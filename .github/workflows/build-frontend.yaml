@@ -8,7 +8,7 @@ on:
       - modules/web/**
       - .github/workflows/**
     tags:
-      - "*"
+      - "v*"
   workflow_dispatch:
 
 env:

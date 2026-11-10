@@ -1,0 +1,108 @@
+name: Extension Push
+
+on:
+  push:
+    tags:
+      - 'extension-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extension-push-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  EXTENSION_NAME: metrics-server
+  HELM_REGISTRY: hub.kubesphere.com.cn
+  HELM_REPOSITORY: oci://hub.kubesphere.com.cn/charts
+
+jobs:
+  push-extension:
+    name: Package and push extension
+    runs-on: self-runner-extensions
+    if: github.repository == 'kubesphere-extensions/metrics-server'
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install ksbuilder
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_release="$(
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/kubesphere/ksbuilder/releases/latest \
+              | jq -r '.tag_name'
+          )"
+
+          if [[ -z "$latest_release" || "$latest_release" == "null" ]]; then
+            echo "Failed to resolve latest ksbuilder release." >&2
+            exit 1
+          fi
+
+          case "$(uname -m)" in
+            x86_64 | amd64)
+              arch="amd64"
+              ;;
+            aarch64 | arm64)
+              arch="arm64"
+              ;;
+            *)
+              echo "Unsupported runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          archive="ksbuilder_${latest_release#v}_linux_${arch}.tar.gz"
+          curl -fsSLO "https://github.com/kubesphere/ksbuilder/releases/download/${latest_release}/${archive}"
+          sudo tar -zxf "$archive" -C /usr/local/bin ksbuilder
+          rm -f "$archive"
+
+          ksbuilder version
+
+      - name: Package extension
+        id: package
+        shell: bash
+        working-directory: config
+        run: |
+          set -euo pipefail
+
+          version="$(
+            awk -F': *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }' \
+              "${EXTENSION_NAME}/extension.yaml"
+          )"
+          package="${EXTENSION_NAME}-${version}.tgz"
+
+          ksbuilder package "$EXTENSION_NAME"
+          test -f "$package"
+          echo "file=$package" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Helm registry
+        shell: bash
+        env:
+          HELM_REGISTRY_USERNAME: ${{ secrets.HUB_KUBESPHERE_USERNAME }}
+          HELM_REGISTRY_PASSWORD: ${{ secrets.HUB_KUBESPHERE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$HELM_REGISTRY_USERNAME" || -z "$HELM_REGISTRY_PASSWORD" ]]; then
+            echo "Missing Helm registry credentials." >&2
+            exit 1
+          fi
+
+          printf '%s' "$HELM_REGISTRY_PASSWORD" \
+            | helm registry login "$HELM_REGISTRY" \
+                --username "$HELM_REGISTRY_USERNAME" \
+                --password-stdin
+
+      - name: Push extension chart
+        shell: bash
+        working-directory: config
+        run: |
+          set -euo pipefail
+
+          helm push "${{ steps.package.outputs.file }}" "$HELM_REPOSITORY"
