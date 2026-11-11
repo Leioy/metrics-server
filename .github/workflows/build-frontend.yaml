@@ -6,22 +6,29 @@ on:
       - "**"
     paths:
       - modules/web/**
-      - .github/workflows/**
+      - .github/workflows/build-frontend.yaml
+      - .github/actions/npm-login/**
     tags:
       - "v*"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/') }}
 
 env:
   EXTENSION_NAME: metrics-server
   FRONTEND_PATH: modules/web
 
   IMAGE_REGISTRY: docker.io
+  HUB_IMAGE_REGISTRY: hub.kubesphere.com.cn
   IMAGE_NAMESPACE: kubesphere
   IMAGE_NAME: metrics-server-frontend
 
 jobs:
   build-extension:
     runs-on: self-runner-extensions
+    timeout-minutes: 30
     steps:
       - name: Set FRONTEND_EXTENSION_PATH
         run: echo "FRONTEND_EXTENSION_PATH=${{ env.FRONTEND_PATH }}/extensions/${{ env.EXTENSION_NAME }}" >> $GITHUB_ENV
@@ -35,7 +42,7 @@ jobs:
           node-version-file: ${{ env.FRONTEND_PATH }}/.nvmrc
 
       - name: Install Yarn
-        run: npm install -g yarn
+        run: npm install -g yarn@1.22.22
 
       - name: Login (Internal)
         uses: ./.github/actions/npm-login
@@ -65,10 +72,41 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      - name: Login to KubeSphere Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.HUB_IMAGE_REGISTRY }}
+          username: ${{ secrets.HUB_KUBESPHERE_USERNAME }}
+          password: ${{ secrets.HUB_KUBESPHERE_PASSWORD }}
+
+      - name: Set image tags
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            printf 'tags<<EOF\n'
+            for registry in "$IMAGE_REGISTRY" "$HUB_IMAGE_REGISTRY"; do
+              printf '%s/%s/%s:%s\n' "$registry" "$IMAGE_NAMESPACE" "$IMAGE_NAME" "$GITHUB_REF_NAME"
+            done
+            printf 'EOF\n'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and Push
         uses: docker/build-push-action@v6
         with:
           context: ${{ env.FRONTEND_EXTENSION_PATH }}
           platforms: linux/amd64,linux/arm64
-          tags: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          tags: ${{ steps.image.outputs.tags }}
           push: true
+
+      - name: Report published images
+        shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.image.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          printf '### Published images\n\n```text\n%s\n```\n' "$IMAGE_TAGS" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
